@@ -3,6 +3,8 @@ extends Node
 
 signal ai_updated()
 signal behaviour_tree_changed()
+signal game_ended(won: bool)
+signal stats_updated()
 
 const AITask = preload("res://scripts/ai/ai_task.gd")
 
@@ -16,6 +18,9 @@ var base_building: Building = null
 var grid_map: GridMap = null
 var behaviour_tree: BehaviourTree = null
 var task_scheduler: TaskScheduler = null
+var game_stats: GameStats = null
+var rl_engine: RLEngine = null
+var current_param_set: ParamSet = null
 var current_order: String = "defend"
 var auto_harvest: bool = true
 var _tick_timer: float = 0.0
@@ -23,6 +28,9 @@ var tick_interval: float = 1.0
 var training_farmer_cost: int = 30
 var training_warrior_cost: int = 50
 var use_task_scheduler: bool = true
+var use_learning: bool = true
+var _game_started: bool = false
+var _game_ended: bool = false
 
 func _ready():
 	_setup_behaviour_tree()
@@ -41,6 +49,32 @@ func _setup_behaviour_tree():
 		task_scheduler.task_assigned.connect(_on_task_assigned)
 		task_scheduler.task_completed.connect(_on_task_completed)
 		task_scheduler.task_cancelled.connect(_on_task_cancelled)
+	if use_learning:
+		game_stats = preload("res://scripts/learning/game_stats.gd").new()
+		game_stats.team = team
+		add_child(game_stats)
+		game_stats.stats_updated.connect(stats_updated.emit)
+		game_stats.game_ended.connect(_on_stats_game_ended)
+		rl_engine = preload("res://scripts/learning/rl_engine.gd").new()
+		rl_engine.save_path = "user://ai_learning_team%d.json" % team
+		add_child(rl_engine)
+		rl_engine.init_with_ai(self)
+		current_param_set = rl_engine.current_param
+
+func start_game():
+	_game_started = true
+	_game_ended = false
+	if game_stats:
+		game_stats.start_game()
+
+func end_game(won: bool):
+	if _game_ended:
+		return
+	_game_ended = true
+	_game_started = false
+	if game_stats:
+		game_stats.end_game(won)
+	game_ended.emit(won)
 
 func _create_default_behaviour_tree():
 	var composite_script = preload("res://scripts/behaviour_tree/bt_composite.gd")
@@ -92,7 +126,17 @@ func _update_enemies():
 			enemies.append(child)
 
 func _on_node_executed(node: BTNode, status: int):
-	pass
+	if not node:
+		return
+	if node.category == "AI Action":
+		if "Attack" in node.node_name or "进攻" in node.description:
+			_record_bt_action("attack")
+		elif "Defend" in node.node_name or "防守" in node.description:
+			_record_bt_action("defend")
+		elif "Expand" in node.node_name or "扩张" in node.description:
+			_record_bt_action("expand")
+		elif "Harvest" in node.node_name or "采集" in node.description:
+			_record_bt_action("harvest")
 
 func _on_task_assigned(task: AITask, unit: UnitBase):
 	if unit and unit.fsm:
@@ -116,7 +160,9 @@ func train_farmer() -> bool:
 	var spawn_pos = grid_map.find_empty_near(base_position, 2)
 	if spawn_pos == base_position:
 		return false
-	resources -= training_farmer_cost
+	spend_resources(training_farmer_cost)
+	if game_stats:
+		game_stats.record_unit_trained(0)
 	var farmer = Farmer.new()
 	farmer.team = team
 	farmer.grid_pos = spawn_pos
@@ -141,7 +187,9 @@ func train_warrior() -> bool:
 	var spawn_pos = grid_map.find_empty_near(base_position, 2)
 	if spawn_pos == base_position:
 		return false
-	resources -= training_warrior_cost
+	spend_resources(training_warrior_cost)
+	if game_stats:
+		game_stats.record_unit_trained(1)
 	var warrior = Warrior.new()
 	warrior.team = team
 	warrior.grid_pos = spawn_pos
@@ -193,8 +241,16 @@ func order_harvest():
 func _on_unit_died(unit: UnitBase):
 	if unit is Farmer:
 		farmers.erase(unit)
+		if game_stats:
+			game_stats.record_unit_lost(0, false)
 	elif unit is Warrior:
 		warriors.erase(unit)
+		if game_stats:
+			game_stats.record_unit_lost(1, false)
+	if unit.target_unit:
+		if is_instance_valid(unit.target_unit):
+			if game_stats:
+				game_stats.record_unit_lost(unit.target_unit.unit_type, unit.team != unit.target_unit.team)
 
 func get_farmer_count() -> int:
 	var count = 0
@@ -209,3 +265,33 @@ func get_warrior_count() -> int:
 		if is_instance_valid(w):
 			count += 1
 	return count
+
+func get_learned_param_int(param_key: String, default_val: int = -1) -> int:
+	if rl_engine and rl_engine.current_param:
+		return rl_engine.current_param.get_int(param_key, default_val)
+	if current_param_set:
+		return current_param_set.get_int(param_key, default_val)
+	return default_val
+
+func get_learned_param_float(param_key: String, default_val: float = -1.0) -> float:
+	if rl_engine and rl_engine.current_param:
+		return rl_engine.current_param.get_float(param_key, default_val)
+	if current_param_set:
+		return current_param_set.get_float(param_key, default_val)
+	return default_val
+
+func _on_stats_game_ended(stats_dict: Dictionary, won: bool):
+	if rl_engine:
+		rl_engine.on_game_ended(stats_dict, won)
+		if rl_engine.current_param:
+			current_param_set = rl_engine.current_param
+			rl_engine.current_param.apply_to_ai(self)
+
+func _record_bt_action(action_type: String):
+	if game_stats:
+		game_stats.record_bt_action(action_type)
+
+func spend_resources(amount: int):
+	resources -= amount
+	if game_stats:
+		game_stats.record_spend(amount)
