@@ -16,6 +16,8 @@ var _load_btn: Button = null
 var _clear_btn: Button = null
 var _apply_btn: Button = null
 var _debug_enabled: bool = true
+var _task_debug_panel: TaskDebugPanel = null
+var _show_task_panel: bool = true
 
 func _ready():
 	_build_ui()
@@ -50,6 +52,12 @@ func _build_ui():
 	debug_check.button_pressed = true
 	debug_check.toggled.connect(_on_debug_toggled)
 	toolbar.add_child(debug_check)
+	var task_panel_btn = Button.new()
+	task_panel_btn.text = "任务面板"
+	task_panel_btn.toggle_mode = true
+	task_panel_btn.button_pressed = true
+	task_panel_btn.toggled.connect(_on_task_panel_toggled)
+	toolbar.add_child(task_panel_btn)
 	var main_hb = HBoxContainer.new()
 	add_child(main_hb)
 	node_panel = BTNodePanel.new()
@@ -59,7 +67,8 @@ func _build_ui():
 	graph_edit.add_theme_color_override("bg_color", Color(0.15, 0.15, 0.2))
 	graph_edit.add_theme_color_override("grid_minor", Color(0.2, 0.2, 0.25))
 	graph_edit.add_theme_color_override("grid_major", Color(0.25, 0.25, 0.3))
-	graph_edit.custom_minimum_size = Vector2(700, 500)
+	graph_edit.custom_minimum_size = Vector2(550, 500)
+	graph_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	graph_edit.connection_request.connect(_on_connection_request)
 	graph_edit.disconnection_request.connect(_on_disconnection_request)
 	graph_edit.connection_to_empty.connect(_on_connection_to_empty)
@@ -69,17 +78,27 @@ func _build_ui():
 	graph_edit.snap_distance = 20
 	graph_edit.use_snap = true
 	main_hb.add_child(graph_edit)
+	_task_debug_panel = TaskDebugPanel.new()
+	_task_debug_panel.visible = _show_task_panel
+	main_hb.add_child(_task_debug_panel)
 
 func set_ai_controller(ai: AIController):
 	ai_controller = ai
 	if ai and ai.behaviour_tree:
 		_load_tree(ai.behaviour_tree.root)
 		ai.behaviour_tree.node_executed.connect(_on_node_executed)
+	if _task_debug_panel:
+		_task_debug_panel.set_ai_controller(ai)
 
 func _on_debug_toggled(value: bool):
 	_debug_enabled = value
 	if not _debug_enabled:
 		_clear_debug_highlights()
+
+func _on_task_panel_toggled(value: bool):
+	_show_task_panel = value
+	if _task_debug_panel:
+		_task_debug_panel.visible = value
 
 func _on_node_executed(node: BTNode, status: int):
 	if not _debug_enabled:

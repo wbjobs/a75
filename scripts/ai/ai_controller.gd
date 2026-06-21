@@ -4,6 +4,8 @@ extends Node
 signal ai_updated()
 signal behaviour_tree_changed()
 
+const AITask = preload("res://scripts/ai/ai_task.gd")
+
 var team: int = 0
 var resources: int = 100
 var farmers: Array[Farmer] = []
@@ -13,12 +15,14 @@ var base_position: Vector2i = Vector2i.ZERO
 var base_building: Building = null
 var grid_map: GridMap = null
 var behaviour_tree: BehaviourTree = null
+var task_scheduler: TaskScheduler = null
 var current_order: String = "defend"
 var auto_harvest: bool = true
 var _tick_timer: float = 0.0
 var tick_interval: float = 1.0
 var training_farmer_cost: int = 30
 var training_warrior_cost: int = 50
+var use_task_scheduler: bool = true
 
 func _ready():
 	_setup_behaviour_tree()
@@ -31,6 +35,12 @@ func _setup_behaviour_tree():
 	behaviour_tree.node_executed.connect(_on_node_executed)
 	add_child(behaviour_tree)
 	_create_default_behaviour_tree()
+	if use_task_scheduler:
+		task_scheduler = TaskScheduler.new(self, grid_map)
+		add_child(task_scheduler)
+		task_scheduler.task_assigned.connect(_on_task_assigned)
+		task_scheduler.task_completed.connect(_on_task_completed)
+		task_scheduler.task_cancelled.connect(_on_task_cancelled)
 
 func _create_default_behaviour_tree():
 	var composite_script = preload("res://scripts/behaviour_tree/bt_composite.gd")
@@ -84,6 +94,18 @@ func _update_enemies():
 func _on_node_executed(node: BTNode, status: int):
 	pass
 
+func _on_task_assigned(task: AITask, unit: UnitBase):
+	if unit and unit.fsm:
+		unit.fsm.set_parameter("current_task", task)
+
+func _on_task_completed(task: AITask, success: bool):
+	if task.assigned_unit and is_instance_valid(task.assigned_unit) and task.assigned_unit.fsm:
+		task.assigned_unit.fsm.set_parameter("current_task", null)
+
+func _on_task_cancelled(task: AITask):
+	if task.assigned_unit and is_instance_valid(task.assigned_unit) and task.assigned_unit.fsm:
+		task.assigned_unit.fsm.set_parameter("current_task", null)
+
 func set_behaviour_tree_root(root: BTNode):
 	if behaviour_tree:
 		behaviour_tree.set_root(root)
@@ -104,11 +126,13 @@ func train_farmer() -> bool:
 	farmer.fsm.set_parameter("ai_controller", self)
 	farmer.fsm.set_parameter("base_position", base_position)
 	farmer.fsm.set_parameter("enemies", enemies)
+	farmer.fsm.set_parameter("task_scheduler", task_scheduler)
 	farmer.add_to_group("units")
 	get_tree().root.add_child(farmer)
 	grid_map.place_unit(spawn_pos, farmer)
 	farmers.append(farmer)
 	farmer.unit_died.connect(_on_unit_died)
+	farmer.state_changed.connect(_on_unit_state_changed.bind(farmer))
 	return true
 
 func train_warrior() -> bool:
@@ -127,12 +151,29 @@ func train_warrior() -> bool:
 	warrior.fsm.set_parameter("ai_controller", self)
 	warrior.fsm.set_parameter("base_position", base_position)
 	warrior.fsm.set_parameter("enemies", enemies)
+	warrior.fsm.set_parameter("task_scheduler", task_scheduler)
 	warrior.add_to_group("units")
 	get_tree().root.add_child(warrior)
 	grid_map.place_unit(spawn_pos, warrior)
 	warriors.append(warrior)
 	warrior.unit_died.connect(_on_unit_died)
+	warrior.state_changed.connect(_on_unit_state_changed.bind(warrior))
 	return true
+
+func _on_unit_state_changed(old_state: String, new_state: String, unit: UnitBase):
+	if not task_scheduler:
+		return
+	var current_task = unit.fsm.get_parameter("current_task", null)
+	if current_task:
+		if new_state == "Idle" and old_state != "Idle":
+			if current_task.status == AITask.TaskStatus.EXECUTING:
+				if old_state == "Harvest" or old_state == "Deposit":
+					current_task.complete(true)
+				elif old_state == "Attack":
+					if unit.target_unit and not is_instance_valid(unit.target_unit):
+						current_task.complete(true)
+					else:
+						current_task.complete(false)
 
 func order_attack():
 	current_order = "attack"
